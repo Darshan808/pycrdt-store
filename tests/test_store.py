@@ -38,6 +38,7 @@ class MyTempFileYStore(TempFileYStore):
 class MySQLiteYStore(SQLiteYStore):
     db_path = MY_SQLITE_YSTORE_DB_PATH
     document_ttl = 1000
+    checkpoint_interval = 50
 
     def __init__(self, *args, delete=False, **kwargs):
         if delete:
@@ -230,3 +231,36 @@ async def test_compression_callbacks_zlib(ystore_api):
                 i += 1
 
             assert i == len(data)
+
+
+@pytest.mark.parametrize("ystore_api", ("ystore_context_manager", "ystore_start_stop"))
+async def test_sqlite_ystore_checkpoint_loading(ystore_api):
+    store_name = "checkpoint_test_store"
+    ystore = MySQLiteYStore(store_name, delete=True)
+    ydoc = YDocTest()
+    async with create_task_group() as tg:
+        if ystore_api == "ystore_start_stop":
+            ystore = StartStopContextManager(ystore, tg)
+
+        async with ystore as ystore:
+            for _ in range(302):
+                update = ydoc.update()
+                await ystore.write(update)
+
+            # Restore using checkpointed loading
+            ydoc_checkpointed = YDocTest()
+            t0 = time.time()
+            await ystore.apply_checkpointed_updates(ydoc_checkpointed.ydoc)
+            t1 = time.time()
+            checkpointed_duration = t1 - t0
+
+            # Restore without using checkpoints
+            ydoc_manual = YDocTest()
+            t2 = time.time()
+            async for update, _, _ in ystore.read():
+                ydoc_manual.ydoc.apply_update(update)
+            t3 = time.time()
+            manual_duration = t3 - t2
+
+    assert ydoc_checkpointed.ydoc.get_state() == ydoc_manual.ydoc.get_state()
+    assert checkpointed_duration < manual_duration
